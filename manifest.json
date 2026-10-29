@@ -1,0 +1,33 @@
+{
+  "id": "io.github.shinnycharizard.deezer",
+  "name": "Deezer",
+  "version": "0.4.3",
+  "api_version": 1,
+  "runtime": "process",
+  "kind": "source",
+  "author": "ShinnyCharizard",
+  "description": "Deezer discovery, saved library, search and authenticated playback. Connect your own session in the guided account setup. Audio quality depends on your subscription and track availability.",
+  "icon": "icon.svg",
+  "delivers_audio": true,
+  "capabilities": [
+    {
+      "type": "register_source"
+    },
+    {
+      "type": "register_panel"
+    },
+    {
+      "type": "own_account",
+      "keyring": false
+    },
+    {
+      "type": "network",
+      "domains": [
+        "www.deezer.com",
+        "api.deezer.com",
+        "media.deezer.com",
+        "dzcdn.net"
+      ]
+    }
+  ]
+}

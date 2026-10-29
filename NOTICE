@@ -1,0 +1,14 @@
+This project includes source from anon7627/deezsrc at
+9b67c19cc9e2ad974c096c6e94f3f054c9ddb976, under the MIT licence.
+Copyright (c) 2026 anon7627. The upstream licence is preserved in LICENSE.
+anon7627 is also the author of ricercar-qconnect.
+
+The native host adapter, guided account forms and packaging were added for
+this distribution. The upstream account validation, subscription checks,
+media resolution and streaming implementation retain their original guards.
+
+Deezer is a trademark of its respective owner. This independent plugin is
+not affiliated with or endorsed by Deezer.
+
+The Deezer icon was supplied from SVG Repo as deezer-logo-svgrepo-com.svg.
+Its vector paths are preserved, with a neutral fill for theme adaptation.
