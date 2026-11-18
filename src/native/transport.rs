@@ -95,17 +95,26 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             } else {
                 12
             };
+            let mutation = method == "page.action"
+                && params["action"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with("playlist.") && a != "playlist.search");
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(timeout),
                 adapter.handle(&method, params),
             )
             .await
-            .unwrap_or_else(|_| Err(RpcError::new(-32005, "Request timed out")));
+            .unwrap_or_else(|_| {
+                Err(RpcError::new(
+                    if mutation { -32006 } else { -32005 },
+                    "Request timed out",
+                ))
+            });
             let response = match result {
                 Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
                 Err(error) => {
                     let error = adapter.safe_error(error);
-                    json!({"jsonrpc":"2.0","id":id,"error":{"code":error.code,"message":error.message}})
+                    json!({"jsonrpc":"2.0","id":id,"error":error.to_json()})
                 }
             };
             let _ = reply.send(response).await;

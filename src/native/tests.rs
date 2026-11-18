@@ -7,6 +7,35 @@ use axum::{
 };
 use std::collections::HashMap;
 
+#[tokio::test]
+async fn initialization_requires_both_absolute_folders_before_opening_storage() {
+    let root = std::env::temp_dir().join(format!("deezer-folders-{}", uuid::Uuid::new_v4()));
+    let data = root.join("chosen account");
+    let cache = root.join("chosen cache");
+    let adapter = Adapter::new(Endpoints::new(None, None, None));
+    let greeting = json!({"protocol":1,"data_dir":data,"cache_dir":cache,"network":{"enabled":false}});
+    for key in ["data_dir", "cache_dir"] {
+        for value in [Value::Null, json!("relative"), json!(""), json!(7)] {
+            let mut params = greeting.clone();
+            params[key] = value;
+            let error = adapter.handle("initialize", params).await.unwrap_err();
+            assert_eq!(error.code, -32602);
+            assert!(error.message.contains(key));
+            assert!(!root.exists(), "A rejected greeting must not open storage");
+        }
+        let mut params = greeting.clone();
+        params.as_object_mut().unwrap().remove(key);
+        assert_eq!(adapter.handle("initialize", params).await.unwrap_err().code, -32602);
+    }
+    assert_eq!(adapter.handle("settings.open", json!({})).await.unwrap_err().code, -32600);
+    assert_eq!(adapter.handle("initialize", greeting).await.unwrap()["protocol"], 1);
+    assert_eq!(adapter.data(), data);
+    assert!(data.is_dir() && cache.is_dir());
+    assert_eq!(adapter.handle("initialize", json!({"protocol":1,"data_dir":root.join("other"),"cache_dir":cache})).await.unwrap_err().code, -32600);
+    assert!(!root.join("other").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 async fn gateway(
     Query(query): Query<HashMap<String, String>>,
     Json(args): Json<Value>,
@@ -23,13 +52,33 @@ async fn gateway(
             }
         }
         Some("playlist.getData") => {
-            json!({"PLAYLIST_ID":args["PLAYLIST_ID"],"TITLE":"Fixture playlist","NB_SONG":"1001"})
+            return Json(
+                json!({"error":{"GATEWAY_ERROR":"Undefined or invalid output"},"results":{}}),
+            );
+        }
+        Some("deezer.pagePlaylist") => {
+            assert_eq!(args["nb"], 0, "Header reads must not fetch embedded tracks");
+            if args["PLAYLIST_ID"] == "95" {
+                return Json(json!({"error":[],"results":{"SONGS":{"data":[]}}}));
+            }
+            if args["PLAYLIST_ID"] == "96" {
+                return Json(json!({"error":{"DATA_ERROR":"Playlist unavailable"},"results":{}}));
+            }
+            let total = match args["PLAYLIST_ID"].as_str().unwrap_or_default() {
+                "92" => "1001",
+                "93" => "10001",
+                "97" => "0",
+                _ => "3",
+            };
+            json!({"DATA":{"PLAYLIST_ID":args["PLAYLIST_ID"],"TITLE":"Fixture playlist","NB_SONG":total},
+                "SONGS":{"data":[],"total":total}})
         }
         Some("playlist.getSongs") => {
             let total = match args["PLAYLIST_ID"].as_str().unwrap_or_default() {
                 "91" => 3,
                 "92" => 1001,
                 "93" => 10001,
+                "97" => 0,
                 _ => 3,
             };
             let start = args["start"].as_u64().unwrap_or(0);
@@ -68,7 +117,7 @@ async fn playlist_tracks_follow_host_bounds_and_do_not_stop_at_one_thousand() {
     adapter
         .handle(
             "initialize",
-            json!({"protocol":1,"data_dir":data,"locale":"en","network":{"enabled":true}}),
+            json!({"protocol":1,"data_dir":data,"cache_dir":data.join("cache"),"locale":"en","network":{"enabled":true}}),
         )
         .await
         .unwrap();
@@ -83,6 +132,8 @@ async fn playlist_tracks_follow_host_bounds_and_do_not_stop_at_one_thousand() {
             .await
             .unwrap();
         assert_eq!(result["playlist"]["ref"], format!("playlist:{id}"));
+        assert_eq!(result["playlist"]["title"], "Fixture playlist");
+        assert_eq!(result["playlist"]["tracks"], length);
         assert_eq!(result["tracks"].as_array().unwrap().len(), length);
         assert_eq!(result["tracks"][0]["ref"], "track:1");
         assert_eq!(
@@ -96,6 +147,30 @@ async fn playlist_tracks_follow_host_bounds_and_do_not_stop_at_one_thousand() {
         .await
         .unwrap();
     assert_eq!(page["shelves"][0]["items"].as_array().unwrap().len(), 1001);
+    let repeated = adapter
+        .handle("page.get", json!({"ref":"playlist:92","refresh":true}))
+        .await
+        .unwrap();
+    assert_eq!(
+        page, repeated,
+        "Equal reads must preserve native rows and identity"
+    );
+    let empty = adapter
+        .handle("playlist.get", json!({"ref":"playlist:97"}))
+        .await
+        .unwrap();
+    assert_eq!(empty["playlist"]["tracks"], 0);
+    assert_eq!(empty["tracks"], json!([]));
+    for id in ["95", "96"] {
+        let error = adapter
+            .handle("playlist.get", json!({"ref":format!("playlist:{id}")}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code, -32002,
+            "Unreadable playlists must remain errors"
+        );
+    }
     for (id, text) in [("93", "requested track limit"), ("94", "non-advancing")] {
         let error = adapter
             .handle(
@@ -149,7 +224,7 @@ async fn home_view_all_includes_preview_rows_and_pages_the_complete_listing() {
     adapter
         .handle(
             "initialize",
-            json!({"protocol":1,"data_dir":data,"locale":"en","network":{"enabled":true}}),
+            json!({"protocol":1,"data_dir":data,"cache_dir":data.join("cache"),"locale":"en","network":{"enabled":true}}),
         )
         .await
         .unwrap();
@@ -331,7 +406,7 @@ async fn catalogue_language_follows_host_locale_instead_of_country() {
     adapter
         .handle(
             "initialize",
-            json!({"protocol":1,"data_dir":data,"locale":"en_US.UTF-8","network":{"enabled":true}}),
+            json!({"protocol":1,"data_dir":data,"cache_dir":data.join("cache"),"locale":"en_US.UTF-8","network":{"enabled":true}}),
         )
         .await
         .unwrap();
@@ -368,7 +443,7 @@ async fn offline_mode_does_not_validate_a_saved_account_or_resolve_audio() {
     adapter
         .handle(
             "initialize",
-            json!({"protocol":1,"data_dir":data,"network":{"enabled":false}}),
+            json!({"protocol":1,"data_dir":data,"cache_dir":data.join("cache"),"network":{"enabled":false}}),
         )
         .await
         .unwrap();

@@ -308,10 +308,11 @@ dependencies = [
 
 [[package]]
 name = "deezer-source"
-version = "0.4.3"
+version = "0.4.9"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "blowfish",
  "cbc",
  "clap",

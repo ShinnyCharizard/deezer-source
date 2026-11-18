@@ -586,10 +586,12 @@ pub async fn get(dz: &Deezer, reference: &str) -> RpcResult {
         Ref::Track(id) => items::track(&dz.api(format!("track/{id}"), vec![]).await?, None),
         Ref::Album(id) => items::album(&dz.api(format!("album/{id}"), vec![]).await?, None),
         Ref::Artist(id) => items::artist(&dz.api(format!("artist/{id}"), vec![]).await?),
-        Ref::Playlist(id) => items::playlist(
-            &dz.gw("playlist.getData", json!({"PLAYLIST_ID": id}))
-                .await?,
-        ),
+        Ref::Playlist(id) => {
+            let page = dz
+                .gw("deezer.pagePlaylist", json!({"PLAYLIST_ID": id, "nb": 0}))
+                .await?;
+            items::playlist(&page["DATA"])
+        }
         Ref::Genre(id) => items::genre(&dz.api(format!("genre/{id}"), vec![]).await?),
         Ref::Flow => Some(items::flow()),
         _ => return Ok(folder(r)),

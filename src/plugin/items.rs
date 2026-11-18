@@ -194,6 +194,10 @@ pub struct Item {
     /// Playlists: the account owns it, so it may edit it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub editable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public: Option<bool>,
     /// Related content offered in the item's menu.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<Action>,
@@ -536,6 +540,8 @@ fn gw_track(v: &Value) -> Option<Item> {
         album,
         track_no: number(v, "TRACK_NUMBER"),
         disc_no: number(v, "DISK_NUMBER"),
+        isrc: text(v, "ISRC"),
+        explicit: v.get("EXPLICIT_LYRICS").map(truthy),
         year: gw_year(v),
         duration_ms: ms(number(v, "DURATION")),
         art: picture("cover", text(v, "ALB_PICTURE")),
@@ -612,6 +618,13 @@ fn gw_album(v: &Value) -> Option<Item> {
         year,
         release_date: text(v, "PHYSICAL_RELEASE_DATE").or_else(|| text(v, "DIGITAL_RELEASE_DATE")),
         label: text(v, "LABEL_NAME"),
+        genre: text(v, "STYLE_NAME"),
+        duration_ms: ms(number(v, "DURATION")),
+        explicit: match num(v.pointer("/EXPLICIT_ALBUM_CONTENT/EXPLICIT_LYRICS_STATUS")) {
+            Some(0) => Some(false),
+            Some(1 | 4) => Some(true),
+            _ => None,
+        },
         added_at: number(v, "DATE_ADD").or_else(|| number(v, "TIME_ADD")),
         track_count: count,
         art: picture("cover", text(v, "ALB_PICTURE")),
@@ -678,6 +691,8 @@ pub fn playlist(v: &Value) -> Option<Item> {
             art: playlist_picture(v, &id),
             browsable: true,
             editable: owned_by_account(number(v, "PARENT_USER_ID")),
+            description: text(v, "DESCRIPTION"),
+            public: number(v, "STATUS").map(|status| status != 1),
             favorite: is_favorite("playlist", &id),
             reference: Ref::Playlist(id).to_string(),
             ..Default::default()
@@ -697,6 +712,8 @@ pub fn playlist(v: &Value) -> Option<Item> {
         art: playlist_picture(v, &id),
         browsable: true,
         editable: owned_by_account(owner.and_then(|o| number(o, "id"))),
+        description: text(v, "description"),
+        public: v["public"].as_bool(),
         favorite: is_favorite("playlist", &id),
         reference: Ref::Playlist(id).to_string(),
         ..Default::default()

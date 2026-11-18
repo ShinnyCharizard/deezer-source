@@ -47,6 +47,9 @@ pub(super) fn item(raw: Value) -> Result<Value, RpcError> {
         "added_at",
         "updated_at",
         "quality",
+        "editable",
+        "description",
+        "public",
     ] {
         if !raw[key].is_null() {
             result[key] = raw[key].clone();
@@ -74,9 +77,8 @@ pub(super) fn item(raw: Value) -> Result<Value, RpcError> {
     if raw["playable"] == false && kind == "track" {
         result["available"] = json!(false);
     }
-    // Playlist editing is deliberately not advertised by this adapter.
     if kind == "playlist" {
-        result["editable"] = json!(false);
+        result["copyable"] = json!(false);
     }
     Ok(result)
 }
@@ -148,6 +150,9 @@ impl Adapter {
     }
 
     pub(super) async fn collection(&self, params: Value, playlist: bool) -> RpcResult {
+        if !playlist {
+            return self.album(params).await;
+        }
         let kind = if playlist { "playlist" } else { "album" };
         let original = reference(&params["ref"], &[kind])?;
         if playlist {
@@ -253,7 +258,17 @@ impl Adapter {
 
     pub(super) async fn page(&self, params: Value) -> RpcResult {
         let target = params["ref"].as_str().unwrap_or_default();
+        if target.starts_with("artist-more:") {
+            return self.artist_more(target).await;
+        }
+        if let Some(module) = target.strip_prefix("feed:") {
+            return self.discovery_module(module).await;
+        }
         if target == "discover:home" {
+            if self.client().has_arl() {
+                self.authenticated().await?;
+                return self.discovery_home().await;
+            }
             let releases_title = self.text("New releases", "Novedades");
             let albums_title = self.text("Popular albums", "Álbumes populares");
             let tracks_title = self.text("Popular tracks", "Pistas populares");
@@ -316,11 +331,16 @@ impl Adapter {
             return Ok(result);
         }
         let original = reference(&params["ref"], &["artist", "album", "playlist"])?;
-        if original.starts_with("playlist/") {
-            let body = self.collection(json!({"ref":target}), true).await?;
+        if original.starts_with("playlist/") || original.starts_with("album/") {
+            let playlist = original.starts_with("playlist/");
+            let kind = if playlist { "playlist" } else { "album" };
+            let body = self.collection(json!({"ref":target}), playlist).await?;
             return Ok(
-                json!({"title":body["playlist"]["title"],"header":body["playlist"],"shelves":[{"id":"tracks","title":self.text("Tracks","Pistas"),"kind":"track","items":body["tracks"]}]}),
+                json!({"title":body[kind]["title"],"header":body[kind],"shelves":[{"id":"tracks","title":self.text("Tracks","Pistas"),"kind":"track","items":body["tracks"]}]}),
             );
+        }
+        if self.client().has_arl() {
+            return self.artist_page(original.trim_start_matches("artist/")).await;
         }
         let header = self.get_item(&original).await?;
         let (id, kind, title) = if original.starts_with("artist/") {

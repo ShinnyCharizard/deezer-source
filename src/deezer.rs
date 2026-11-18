@@ -8,6 +8,8 @@
 //! Nothing here logs the `arl`, the `api_token`, the license token or URLs
 //! with their query: error messages name the method or path only.
 
+mod graphql;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,6 +30,8 @@ pub struct Endpoints {
     pub gw: String,
     pub api: String,
     pub media: String,
+    pub auth: String,
+    pub pipe: String,
 }
 
 impl Endpoints {
@@ -38,6 +42,8 @@ impl Endpoints {
             gw: root(gw, "https://www.deezer.com"),
             api: root(api, "https://api.deezer.com"),
             media: root(media, "https://media.deezer.com"),
+            auth: root(gw, "https://auth.deezer.com"),
+            pipe: root(gw, "https://pipe.deezer.com"),
         }
     }
 }
@@ -178,6 +184,7 @@ pub struct Deezer {
     ep: Arc<Endpoints>,
     arl: Option<Arc<String>>,
     session: Arc<tokio::sync::Mutex<Option<Session>>>,
+    graphql_auth: Arc<tokio::sync::Mutex<graphql::GraphqlAuth>>,
     language: Arc<str>,
 }
 
@@ -266,6 +273,7 @@ impl Deezer {
             ep: Arc::new(ep),
             arl: None,
             session: Arc::default(),
+            graphql_auth: Arc::default(),
             language: Arc::from("en"),
         }
     }
@@ -296,6 +304,7 @@ impl Deezer {
         Deezer {
             arl: Some(Arc::new(arl.to_string())),
             session: Arc::default(),
+            graphql_auth: Arc::default(),
             ..self.clone()
         }
     }
@@ -305,12 +314,17 @@ impl Deezer {
         Deezer {
             arl: None,
             session: Arc::default(),
+            graphql_auth: Arc::default(),
             ..self.clone()
         }
     }
 
     pub fn has_arl(&self) -> bool {
         self.arl.is_some()
+    }
+
+    pub fn language(&self) -> &str {
+        &self.language
     }
 
     pub fn endpoints(&self) -> &Endpoints {
@@ -430,7 +444,16 @@ impl Deezer {
     /// Call a gateway method; `results` of the answer. A refused
     /// `api_token` opens the session again, then the call is retried once.
     pub async fn gw(&self, method: &str, args: Value) -> Result<Value> {
-        for attempt in 0..2 {
+        self.gw_call(method, args, true).await
+    }
+
+    /// A write is sent once, including when the service rejects its form token.
+    pub async fn gw_write(&self, method: &str, args: Value) -> Result<Value> {
+        self.gw_call(method, args, false).await
+    }
+
+    async fn gw_call(&self, method: &str, args: Value, retry_token: bool) -> Result<Value> {
+        for attempt in 0..if retry_token { 2 } else { 1 } {
             self.user().await?;
             let (token, cookies) = {
                 let s = self.session.lock().await;
@@ -451,13 +474,15 @@ impl Deezer {
             let Some((kind, message)) = gw_error(&v) else {
                 return Ok(v.get("results").cloned().unwrap_or(Value::Null));
             };
-            if is_token_error(&kind, &message) && attempt == 0 {
+            if retry_token && is_token_error(&kind, &message) && attempt == 0 {
                 tracing::debug!("gateway {method}: api token refused, opening the session again");
                 *self.session.lock().await = None;
                 continue;
             }
-            if kind == "NEED_USER_AUTH_REQUIRED" || (is_token_error(&kind, &message) && attempt > 0)
+            if kind == "NEED_USER_AUTH_REQUIRED"
+                || (is_token_error(&kind, &message) && (!retry_token || attempt > 0))
             {
+                *self.session.lock().await = None;
                 return Err(anyhow!(SignedOut).context(format!("gateway {method}")));
             }
             let text = format!("gateway {method}: {kind} {message}");

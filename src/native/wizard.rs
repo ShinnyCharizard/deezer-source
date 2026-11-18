@@ -57,7 +57,9 @@ impl Wizard {
     }
 
     fn action(&self, key: &str, english: &str, spanish: &str, fields: &[&str]) -> Value {
-        json!({"key": key, "label": self.text(english, spanish), "fields": fields})
+        let mut action = json!({"key": key, "label": self.text(english, spanish), "fields": fields});
+        if key == "sign_out" { action["destructive"] = json!("account"); }
+        action
     }
 
     fn quality_field(&self) -> Value {

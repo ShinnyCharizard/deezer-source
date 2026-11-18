@@ -1,5 +1,15 @@
 //! A single native process owns account state, catalogue reads and the audio relay.
+mod albums;
+mod artists;
+#[cfg(test)]
+mod artist_tests;
 mod catalog;
+#[cfg(test)]
+mod catalog_tests;
+mod discovery;
+#[cfg(test)]
+mod feature_tests;
+mod playlists;
 #[cfg(test)]
 mod tests;
 mod transport;
@@ -40,7 +50,9 @@ struct Adapter {
     client: Mutex<Deezer>,
     wizard: AsyncMutex<Wizard>,
     operations: RwLock<()>,
+    playlist_writes: AsyncMutex<()>,
     initialized: AtomicBool,
+    catalog_retry: Mutex<Option<std::time::Instant>>,
     online: AtomicBool,
     library: upstream::Library,
     relay: Mutex<Relay>,
@@ -53,7 +65,9 @@ impl Adapter {
             client: Mutex::new(Deezer::new(endpoints)),
             wizard: AsyncMutex::new(Wizard::default()),
             operations: RwLock::new(()),
+            playlist_writes: AsyncMutex::new(()),
             initialized: AtomicBool::new(false),
+            catalog_retry: Mutex::new(None),
             online: AtomicBool::new(false),
             library: upstream::Library::default(),
             relay: Mutex::new(Relay::default()),
@@ -110,20 +124,25 @@ impl Adapter {
                 "Expected one protocol 1 initialization",
             ));
         }
-        let data = params["data_dir"]
-            .as_str()
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .ok_or_else(|| {
-                RpcError::invalid_params("An absolute private data directory is required")
-            })?;
-        std::fs::create_dir_all(&data)
-            .map_err(|_| RpcError::new(-32603, "Cannot create private data directory"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700))
-                .map_err(|_| RpcError::new(-32603, "Cannot protect private storage"))?;
+        let folder = |key: &str| {
+            params[key]
+                .as_str()
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .ok_or_else(|| RpcError::invalid_params(format!("An absolute {key} is required")))
+        };
+        // Validate both before opening storage; a rejected greeting writes nothing.
+        let data = folder("data_dir")?;
+        let cache = folder("cache_dir")?;
+        for path in [&data, &cache] {
+            std::fs::create_dir_all(path)
+                .map_err(|_| RpcError::new(-32603, "Cannot create private storage"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|_| RpcError::new(-32603, "Cannot protect private storage"))?;
+            }
         }
         let language = params["locale"].as_str().unwrap_or("es").to_owned();
         let localized = self.client().with_locale(&language);
@@ -158,7 +177,7 @@ impl Adapter {
         self.initialized.store(true, Ordering::Release);
         Ok(
             json!({"protocol":1,"capabilities":{"search":true,"pages":true,"settings":true,
-            "favorites":true,"library":["albums","tracks","artists","playlists"],"scene_search_limit":0,
+            "favorites":true,"playlist_edit":true,"folder_edit":false,"library":["albums","tracks","artists","playlists"],"scene_search_limit":0,
             "navigation":{"discover":self.text("Home","Inicio"),"library":self.text("My library","Mi biblioteca")}}}),
         )
     }
@@ -287,6 +306,7 @@ impl Adapter {
                     .map_err(|_| RpcError::new(-32603, "Cannot remove the saved session"))?;
                 let signed_out = self.client().signed_out();
                 *self.client.lock().unwrap_or_else(|e| e.into_inner()) = signed_out;
+                *self.catalog_retry.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 let mut relay = self.relay.lock().unwrap_or_else(|e| e.into_inner());
                 relay.clear();
                 *relay = Relay::default();
@@ -313,6 +333,7 @@ impl Adapter {
                                 RpcError::new(-32603, "Cannot save the validated session")
                             })?;
                             *self.client.lock().unwrap_or_else(|e| e.into_inner()) = client;
+                            *self.catalog_retry.lock().unwrap_or_else(|e| e.into_inner()) = None;
                             {
                                 let mut relay =
                                     self.relay.lock().unwrap_or_else(|e| e.into_inner());
@@ -400,12 +421,22 @@ impl Adapter {
         }
         let _guard = self.operations.read().await;
         self.network()?;
-        match method {
+        let catalogue = matches!(method, "search" | "page.get" | "track.get" | "album.get" | "playlist.get" | "library.list");
+        if catalogue {
+            self.catalogue_ready(params["refresh"] == true)?;
+        }
+        let result = match method {
+            "page.action"
+                if params["action"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with("playlist.")) =>
+            {
+                self.edit_playlist(params).await
+            }
             "search" => self.search(params).await,
             "page.get" => self.page(params).await,
-            "track.get" => Ok(
-                json!({"track":self.get_item(&catalog::reference(&params["ref"],&["track"])?).await?}),
-            ),
+            "track.get" => self.get_item(&catalog::reference(&params["ref"],&["track"])?).await
+                .map(|track| json!({"track":track})),
             "album.get" => self.collection(params, false).await,
             "playlist.get" => self.collection(params, true).await,
             "library.list" => self.library_list(params).await,
@@ -424,7 +455,33 @@ impl Adapter {
                 Ok(json!({}))
             }
             _ => Err(RpcError::new(-32601, "Method unavailable")),
+        };
+        if catalogue {
+            if let Err(error) = &result {
+                if error.code == -32004 {
+                    let seconds = error.data.as_ref().and_then(|data| data["retry_after"].as_u64())
+                        .unwrap_or(5).clamp(1,3600);
+                    let until = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+                    let mut retry = self.catalog_retry.lock().unwrap_or_else(|e| e.into_inner());
+                    *retry = Some(retry.map_or(until, |old| old.max(until)));
+                }
+            }
         }
+        result
+    }
+
+    fn catalogue_ready(&self, refresh: bool) -> Result<(), RpcError> {
+        let mut retry = self.catalog_retry.lock().unwrap_or_else(|e| e.into_inner());
+        if refresh {
+            *retry = None;
+        }
+        if let Some(remaining) = retry.and_then(|until| until.checked_duration_since(std::time::Instant::now())) {
+            let mut error = RpcError::new(-32004, "The catalogue is waiting for the service retry delay");
+            error.data = Some(json!({"retry_after":(remaining.as_secs()+1).clamp(1,3600)}));
+            return Err(error);
+        }
+        *retry = None;
+        Ok(())
     }
 
     fn safe_error(&self, error: RpcError) -> RpcError {
@@ -449,6 +506,10 @@ impl Adapter {
                 "Check the connection and offline setting, then try again.",
                 "Revisa la conexión y el modo sin conexión; después vuelve a intentarlo.",
             ),
+            -32006 => self.text(
+                "The playlist change could not be confirmed. Open the playlist before retrying.",
+                "No se pudo confirmar el cambio. Abre la playlist antes de volver a intentarlo.",
+            ),
             -32601 => return RpcError::new(-32601, "Method unavailable"),
             -32602 => self.text(
                 "Check the form or request and try again.",
@@ -459,7 +520,14 @@ impl Adapter {
                 "No se pudo completar la operación. Vuelve a intentarlo.",
             ),
         };
-        RpcError::new(error.code, message)
+        let mut safe = RpcError::new(error.code, message);
+        if error.code == -32004 {
+            if let Some(seconds) = error.data.as_ref()
+                .and_then(|data| data["retry_after"].as_u64()) {
+                safe.data = Some(json!({"retry_after":seconds.clamp(1,3600)}));
+            }
+        }
+        safe
     }
 }
 
