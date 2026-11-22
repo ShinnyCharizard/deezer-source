@@ -1,6 +1,6 @@
 [package]
 name = "deezer-source"
-version = "0.4.9"
+version = "0.4.10"
 edition = "2021"
 description = "Deezer source plugin (JSON-RPC over stdio): catalogue, sign-in with the arl cookie, stream resolution through a local decrypting relay"
 license = "MIT"

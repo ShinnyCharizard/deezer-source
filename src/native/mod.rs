@@ -176,7 +176,7 @@ impl Adapter {
         }
         self.initialized.store(true, Ordering::Release);
         Ok(
-            json!({"protocol":1,"capabilities":{"search":true,"pages":true,"settings":true,
+            json!({"protocol":1,"capabilities":{"search":true,"pages":true,"genre_discovery":1,"settings":true,
             "favorites":true,"playlist_edit":true,"folder_edit":false,"library":["albums","tracks","artists","playlists"],"scene_search_limit":0,
             "navigation":{"discover":self.text("Home","Inicio"),"library":self.text("My library","Mi biblioteca")}}}),
         )

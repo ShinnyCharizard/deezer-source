@@ -65,6 +65,9 @@ async fn public(
         .unwrap_or(0);
     state.lock().unwrap().calls.push(format!("{path}:{index}"));
     Json(match path.as_str() {
+        "genre" => json!({"data":[{"id":152,"name":"Rock"}]}),
+        "editorial/152/selection" => json!({"data":[{"id":8,"title":"Newest","artist":{"id":2,"name":"Artist"}}]}),
+        "genre/152/artists" => json!({"data":[{"id":2,"name":"Artist"},{"id":4,"name":"Another artist"}]}),
         "album/3" => {
             json!({"id":3,"title":"Album","artist":{"id":2,"name":"Artist"},"nb_tracks":4})
         }
@@ -114,6 +117,20 @@ async fn setup(
         *adapter.client.lock().unwrap() = signed_in;
     }
     (adapter, state, server, data)
+}
+
+#[tokio::test]
+async fn genre_page_uses_scoped_release_and_artist_endpoints() {
+    let (adapter, state, server, data) = setup(false).await;
+    let page = adapter.handle("page.get", json!({"ref":"genre-discovery","filters":{"genre":"rock"},"limit":60})).await.unwrap();
+    assert_eq!(page["shelves"][0]["items"][0]["ref"], "album:8");
+    assert_eq!(page["shelves"][1]["items"][1]["ref"], "artist:4");
+    assert_eq!(adapter.handle("page.get", json!({"ref":"genre-discovery","filters":{"genre":"unknown"}})).await.unwrap()["shelves"], json!([]));
+    let calls = state.lock().unwrap().calls.clone();
+    assert!(calls.contains(&"editorial/152/selection:0".to_string()));
+    assert!(calls.contains(&"genre/152/artists:0".to_string()));
+    server.abort();
+    std::fs::remove_dir_all(data).unwrap();
 }
 
 #[tokio::test]

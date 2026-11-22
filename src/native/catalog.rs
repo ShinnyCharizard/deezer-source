@@ -256,8 +256,41 @@ impl Adapter {
         Ok(shelf)
     }
 
+    async fn genre_discovery(&self, params: &Value) -> RpcResult {
+        let genre = params["filters"]["genre"].as_str().unwrap_or_default().trim();
+        if genre.is_empty() || genre.len() > 1024 {
+            return Err(RpcError::invalid_params("Invalid genre name"));
+        }
+        let client = self.client();
+        let available = client.api("genre", vec![]).await?;
+        let folded = genre.to_lowercase();
+        let identifier = available["data"].as_array().into_iter().flatten().find(|genre| {
+            genre["name"].as_str().is_some_and(|name| name.trim().to_lowercase() == folded)
+        }).and_then(|genre| items::id_at(genre, "id")).filter(|id| id != "0");
+        let Some(id) = identifier else { return Ok(json!({"shelves":[]})); };
+        let limit = params["limit"].as_u64().unwrap_or(60).clamp(1, 60);
+        let releases_ref = format!("genre/{id}");
+        let (releases, artists) = tokio::join!(
+            self.list(&releases_ref, 0, limit),
+            client.api(format!("genre/{id}/artists"), vec![("limit", limit.to_string())])
+        );
+        let (releases, artists) = match (releases, artists) {
+            (Err(error), Err(_)) => return Err(error),
+            (releases, artists) => (releases.ok(), artists.ok()),
+        };
+        let releases = releases.as_ref().map(entries).transpose()?.unwrap_or_default();
+        let artists: Vec<Value> = artists.as_ref().and_then(|reply| reply["data"].as_array()).into_iter().flatten()
+            .filter_map(items::artist).filter_map(|row| serde_json::to_value(row).ok())
+            .filter_map(|row| item(row).ok()).take(limit as usize).collect();
+        Ok(json!({"shelves":[
+            {"id":"new_releases","title":self.text("New releases","Novedades"),"kind":"album","items":releases},
+            {"id":"artists","title":self.text("Artists","Artistas"),"kind":"artist","items":artists}
+        ]}))
+    }
+
     pub(super) async fn page(&self, params: Value) -> RpcResult {
         let target = params["ref"].as_str().unwrap_or_default();
+        if target == "genre-discovery" { return self.genre_discovery(&params).await; }
         if target.starts_with("artist-more:") {
             return self.artist_more(target).await;
         }
